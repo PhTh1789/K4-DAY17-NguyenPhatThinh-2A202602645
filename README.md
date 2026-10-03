@@ -30,12 +30,13 @@ Sau khi hoàn thành, các bạn cần có khả năng:
 ```
 .
 ├── README.md        # giới thiệu track (file này)
+├── STEP8.md         # phân tích kết quả theo Bước 8 của Guide
 ├── Guide.md         # hướng dẫn từng bước
 ├── Rubric.md        # tiêu chí chấm điểm
 ├── data/            # dữ liệu benchmark dùng chung
 │   ├── conversations.json
 │   └── advanced_long_context.json
-└── src/             # bản scaffold dành cho sinh viên (pseudocode + TODO)
+└── src/             # implementation đã hoàn thiện
     ├── model_provider.py
     ├── config.py
     ├── memory_store.py
@@ -74,7 +75,7 @@ message người dùng
 
 Baseline Agent chỉ giữ danh sách message theo `thread_id`. Sang thread mới, nó **phải quên** toàn bộ fact cũ.
 
-Cả hai agent nên có **chế độ offline** cho ra kết quả lặp lại được, để benchmark và test chạy được mà không cần API key. Chế độ live (LangChain/LangGraph) là phần mở rộng.
+Cả hai agent có **chế độ offline** cho ra kết quả lặp lại được, để benchmark và test chạy được mà không cần API key. Chế độ live (LangChain/LangGraph) là phần mở rộng tùy chọn.
 
 ## Dữ liệu benchmark
 
@@ -119,7 +120,7 @@ Trong bản solved lab, runtime hỗ trợ các provider sau:
 
 ## Chỉ số benchmark cần hiểu
 
-Khi hoàn thiện bài, benchmark nên cho các cột sau:
+Benchmark in ra các cột sau:
 
 - `Agent tokens only`: token sinh ra trực tiếp trong hội thoại của agent
 - `Prompt tokens processed`: lượng ngữ cảnh agent phải kéo theo qua các lượt
@@ -143,17 +144,20 @@ source .venv/bin/activate
 pip install langchain langgraph langchain-openai langchain-google-genai langchain-anthropic langchain-ollama langchain-openrouter python-dotenv tabulate pytest
 ```
 
-Nếu muốn chạy chế độ live với LLM thật, hãy tạo file `.env` ở root repo (đã nằm trong `.gitignore`). Tên biến môi trường do các bạn quyết định khi viết `load_config()`. Ví dụ:
+Nếu muốn chạy chế độ live với LLM thật, hãy tạo file `.env` ở root repo (đã nằm trong `.gitignore`). Các biến môi trường được `load_config()` hỗ trợ gồm:
 
 ```
 LLM_PROVIDER=openai
 LLM_MODEL=gpt-4o-mini
 OPENAI_API_KEY=...
+COMPACT_THRESHOLD_TOKENS=1200
+COMPACT_KEEP_MESSAGES=6
+PROFILE_CONFIDENCE_THRESHOLD=0.8
 ```
 
 ## Chạy benchmark và test
 
-Sau khi hoàn thiện `src/`, chạy từ root repo:
+Chạy hai lệnh kiểm tra bắt buộc từ root repo:
 
 ```bash
 python src/benchmark.py
@@ -174,11 +178,22 @@ Nếu các bạn là sinh viên:
 
 Nếu các bạn là giảng viên hoặc reviewer:
 
-- dùng `src/` để đánh giá scaffold giao cho sinh viên và kết quả hoàn thiện cuối cùng
+- dùng `src/` để đánh giá implementation và kết quả hoàn thiện cuối cùng
 
 ## Tài liệu nên đọc tiếp
 
 - `Guide.md`: hướng dẫn từng bước để hoàn thành lab
 - `Rubric.md`: tiêu chí chấm điểm và bonus
+- `STEP8.md`: kết quả benchmark và câu trả lời cho bốn câu hỏi phân tích của Bước 8
 
 Track này được thiết kế để các bạn không chỉ “dùng agent”, mà còn bắt đầu nghĩ như một người thiết kế **memory system** cho agent production.
+
+## Trạng thái hoàn thành
+
+Bài lab đã hoàn thiện Baseline Agent, Advanced Agent, persistent `User.md`,
+compact memory, benchmark offline deterministic và các memory guardrail. Bộ
+kiểm thử hiện có 22 test cases và bao phủ đầy đủ bốn hành vi tối thiểu mà Guide
+yêu cầu.
+
+Kết quả benchmark, bốn câu trả lời phân tích của Bước 8, bonus và giới hạn phép
+đo được trình bày riêng trong [`STEP8.md`](STEP8.md).

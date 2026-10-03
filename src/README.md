@@ -1,19 +1,22 @@
-# Student Scaffold
+# Completed Implementation
 
-This `src/` folder is the student version of the lab.
+This folder contains the completed Day 17 memory-system implementation:
 
-- It keeps the same high-level structure
-- The Python files are intentionally incomplete and contain pseudocode / TODOs
-- The benchmark structure should include: standard benchmark + long-context stress benchmark
-- The runtime should support these providers: `openai`, `custom`, `gemini`, `anthropic`, `ollama`, `openrouter`
+- deterministic offline Baseline and Advanced agents;
+- optional live models for OpenAI, custom OpenAI-compatible endpoints, Gemini,
+  Anthropic, Ollama, and OpenRouter;
+- persistent `User.md` profiles with structured extraction and conflict handling;
+- compact memory for bounded long-context prompts;
+- confidence and storage-growth guardrails;
+- Standard and Long-Context Stress benchmarks; and
+- 22 behavioral and regression tests.
 
-Suggested flow:
+Run from the repository root:
 
-1. Start with `config.py`
-2. Implement `memory_store.py`
-3. Finish `agent_baseline.py`
-4. Finish `agent_advanced.py`
-5. Implement `benchmark.py`
-6. Make `test_agents.py` pass
+```bash
+python src/benchmark.py
+pytest src/test_agents.py -v
+```
 
-Datasets are available at the repo root in `data/`.
+See the root `STEP8.md` for benchmark results, trade-off analysis, limitations,
+and production risks.
