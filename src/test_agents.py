@@ -9,6 +9,9 @@ from agent_baseline import BaselineAgent
 from config import load_config
 from memory_store import (
     EMPTY_PROFILE,
+    MAX_FACT_VALUE_CHARS,
+    MAX_MERGED_FACT_PARTS,
+    MAX_PROFILE_BYTES,
     CompactMemoryManager,
     UserProfileStore,
     estimate_tokens,
@@ -308,3 +311,58 @@ def test_compact_reduces_prompt_load_on_long_thread(tmp_path: Path) -> None:
     assert baseline.token_usage(thread_id) > 0
     assert advanced.token_usage(thread_id) > 0
     assert baseline.compaction_count(thread_id) == 0
+
+
+def test_confidence_threshold_filters_less_certain_profile_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep explicit corrections while allowing lower-confidence facts to be skipped."""
+
+    interests = "Mình thích Python, AI ứng dụng và cà phê sữa đá."
+    correction = "Mình đính chính: nơi ở hiện tại là Huế."
+    assert extract_profile_updates(interests, min_confidence=0.81) == {}
+    assert extract_profile_updates(correction, min_confidence=0.98) == {
+        "location": "Huế"
+    }
+
+    monkeypatch.setenv("PROFILE_CONFIDENCE_THRESHOLD", "0.81")
+    config = load_config(tmp_path)
+    advanced = AdvancedAgent(config=config, force_offline=True)
+    advanced.reply("guarded-user", "thread-1", interests)
+    assert "interests" not in advanced.profile_store.facts("guarded-user")
+
+    with pytest.raises(ValueError, match="min_confidence"):
+        extract_profile_updates(interests, min_confidence=1.01)
+
+    monkeypatch.setenv("PROFILE_CONFIDENCE_THRESHOLD", "1.01")
+    with pytest.raises(ValueError, match="PROFILE_CONFIDENCE_THRESHOLD"):
+        load_config(tmp_path)
+
+    monkeypatch.setenv("PROFILE_CONFIDENCE_THRESHOLD", "nan")
+    with pytest.raises(ValueError, match="finite"):
+        load_config(tmp_path)
+
+
+def test_profile_storage_is_bounded_and_leaves_no_temporary_files(
+    tmp_path: Path,
+) -> None:
+    """Bound persistent memory growth and keep completed writes atomic."""
+
+    store = UserProfileStore(tmp_path / "profiles")
+    user_id = "bounded-user"
+    original = "# User Profile\n\n- name: Safe User\n"
+    path = store.write_text(user_id, original)
+
+    with pytest.raises(ValueError, match="storage limit"):
+        store.write_text(user_id, "x" * (MAX_PROFILE_BYTES + 1))
+    with pytest.raises(ValueError, match="character limit"):
+        store.upsert_fact(user_id, "name", "x" * (MAX_FACT_VALUE_CHARS + 1))
+    assert path.read_text(encoding="utf-8") == original
+
+    for index in range(MAX_MERGED_FACT_PARTS + 4):
+        store.upsert_fact(user_id, "interests", f"topic-{index}")
+    interests = store.facts(user_id)["interests"].split(", ")
+    assert len(interests) == MAX_MERGED_FACT_PARTS
+    assert interests[0] == "topic-4"
+    assert interests[-1] == f"topic-{MAX_MERGED_FACT_PARTS + 3}"
+    assert not list(path.parent.glob(".User.*.tmp"))

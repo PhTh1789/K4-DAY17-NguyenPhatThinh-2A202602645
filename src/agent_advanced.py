@@ -138,7 +138,10 @@ class AdvancedAgent:
         return self._answer_from_facts(facts, message.casefold())
 
     def _persist_updates(self, user_id: str, message: str) -> dict[str, str]:
-        updates = extract_profile_updates(message)
+        updates = extract_profile_updates(
+            message,
+            min_confidence=self.config.profile_confidence_threshold,
+        )
         for key, value in updates.items():
             self.profile_store.upsert_fact(user_id, key, value)
         return updates

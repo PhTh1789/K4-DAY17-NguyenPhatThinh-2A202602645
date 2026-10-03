@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,6 +42,20 @@ PROFESSION = (
 SUMMARY_MAX_ITEMS = 6
 SUMMARY_ITEM_MAX_CHARS = 180
 MESSAGE_ROLES = {"user", "assistant", "system", "tool"}
+DEFAULT_PROFILE_CONFIDENCE_THRESHOLD = 0.8
+MAX_FACT_VALUE_CHARS = 500
+MAX_MERGED_FACT_PARTS = 16
+MAX_PROFILE_BYTES = 64 * 1024
+PROFILE_FACT_BASE_CONFIDENCE = {
+    "name": 0.98,
+    "location": 0.95,
+    "profession": 0.95,
+    "response_style": 0.90,
+    "favorite_drink": 0.92,
+    "favorite_food": 0.92,
+    "pet": 0.92,
+    "interests": 0.80,
+}
 
 
 def estimate_tokens(text: str) -> int:
@@ -83,8 +99,31 @@ class UserProfileStore:
 
     def write_text(self, user_id: str, content: str) -> Path:
         path = self.path_for(user_id)
+        content_size = len(content.encode("utf-8"))
+        if content_size > MAX_PROFILE_BYTES:
+            raise ValueError(
+                f"Profile exceeds the {MAX_PROFILE_BYTES}-byte storage limit."
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8", newline="\n")
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="\n",
+                prefix=".User.",
+                suffix=".tmp",
+                dir=path.parent,
+                delete=False,
+            ) as temporary_file:
+                temporary_file.write(content)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+                temporary_path = Path(temporary_file.name)
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
         return path
 
     def edit_text(self, user_id: str, search_text: str, replacement: str) -> bool:
@@ -99,7 +138,7 @@ class UserProfileStore:
         if search_text not in current:
             return False
         updated = current.replace(search_text, replacement, 1)
-        path.write_text(updated, encoding="utf-8", newline="\n")
+        self.write_text(user_id, updated)
         return True
 
     def file_size(self, user_id: str) -> int:
@@ -125,13 +164,26 @@ class UserProfileStore:
             raise ValueError(f"Invalid fact key: {key!r}.")
         if not normalized_value:
             raise ValueError("Fact value must not be empty.")
+        if len(normalized_value) > MAX_FACT_VALUE_CHARS:
+            raise ValueError(
+                f"Fact value exceeds the {MAX_FACT_VALUE_CHARS}-character limit."
+            )
 
         facts = self.facts(user_id)
         separator = MERGED_FACT_SEPARATORS.get(normalized_key)
         if separator and normalized_key in facts:
-            existing_parts = [part.strip() for part in facts[normalized_key].split(separator)]
+            existing_parts = [
+                part.strip() for part in facts[normalized_key].split(separator)
+            ]
             new_parts = [part.strip() for part in normalized_value.split(separator)]
-            normalized_value = separator.join(dict.fromkeys(existing_parts + new_parts))
+            merged_parts = list(dict.fromkeys(existing_parts + new_parts))
+            merged_parts = merged_parts[-MAX_MERGED_FACT_PARTS:]
+            while (
+                len(separator.join(merged_parts)) > MAX_FACT_VALUE_CHARS
+                and len(merged_parts) > 1
+            ):
+                merged_parts.pop(0)
+            normalized_value = separator.join(merged_parts)
         facts[normalized_key] = normalized_value
         ordered_keys = [key for key in FACT_ORDER if key in facts]
         ordered_keys.extend(sorted(set(facts) - set(ordered_keys)))
@@ -139,13 +191,37 @@ class UserProfileStore:
         return self.write_text(user_id, f"{EMPTY_PROFILE}{body}\n")
 
 
-def extract_profile_updates(message: str) -> dict[str, str]:
+def _profile_update_confidence(key: str, lower_message: str) -> float:
+    """Return a conservative confidence score for one extracted profile fact."""
+
+    confidence = PROFILE_FACT_BASE_CONFIDENCE.get(key, 0.0)
+    correction_markers = (
+        "đính chính",
+        "hiện tại",
+        "không còn",
+        "cập nhật",
+        "thực ra",
+    )
+    if key in {"location", "profession"} and any(
+        marker in lower_message for marker in correction_markers
+    ):
+        return 0.99
+    return confidence
+
+
+def extract_profile_updates(
+    message: str,
+    min_confidence: float = DEFAULT_PROFILE_CONFIDENCE_THRESHOLD,
+) -> dict[str, str]:
     """Extract high-confidence, persistent facts from one user message.
 
     The rules intentionally favor precision over recall: explicit statements,
     corrections, and stable preferences are accepted, while recall questions
     and known joke/noise constructions are ignored.
     """
+
+    if not math.isfinite(min_confidence) or not 0 <= min_confidence <= 1:
+        raise ValueError("min_confidence must be between 0 and 1.")
 
     text = " ".join(message.split())
     if not text:
@@ -299,7 +375,12 @@ def extract_profile_updates(message: str) -> dict[str, str]:
         if interests:
             updates["interests"] = ", ".join(dict.fromkeys(interests))
 
-    return updates
+    return {
+        key: value
+        for key, value in updates.items()
+        if len(value) <= MAX_FACT_VALUE_CHARS
+        and _profile_update_confidence(key, lower) >= min_confidence
+    }
 
 
 def summarize_messages(messages: list[dict[str, str]], max_items: int = 6) -> str:

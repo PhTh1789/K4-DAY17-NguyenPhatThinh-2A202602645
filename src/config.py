@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ class LabConfig:
     compact_keep_messages: int
     model: ProviderConfig
     judge_model: ProviderConfig
+    profile_confidence_threshold: float = 0.8
 
 
 DEFAULT_MODELS = {
@@ -59,8 +61,15 @@ def _non_negative_float(name: str, default: float) -> float:
         value = float(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be a number, got {raw!r}.") from exc
-    if value < 0:
-        raise ValueError(f"{name} must be non-negative, got {value}.")
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be finite and non-negative, got {value}.")
+    return value
+
+
+def _probability(name: str, default: float) -> float:
+    value = _non_negative_float(name, default)
+    if value > 1:
+        raise ValueError(f"{name} must be between 0 and 1, got {value}.")
     return value
 
 
@@ -141,4 +150,7 @@ def load_config(base_dir: Path | None = None) -> LabConfig:
         compact_keep_messages=_positive_int("COMPACT_KEEP_MESSAGES", 6),
         model=model,
         judge_model=judge_model,
+        profile_confidence_threshold=_probability(
+            "PROFILE_CONFIDENCE_THRESHOLD", 0.8
+        ),
     )
