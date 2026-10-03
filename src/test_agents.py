@@ -18,12 +18,12 @@ from memory_store import (
 
 
 def make_config(tmp_path: Path):
-    """Student TODO: build an isolated config for tests."""
+    """Build a deterministic config with isolated state and fast compaction."""
 
-    # Hint:
-    # - point `state_dir` into tmp_path
-    # - reduce compact threshold so compaction happens quickly in tests
-    raise NotImplementedError
+    config = load_config(tmp_path)
+    config.compact_threshold_tokens = 140
+    config.compact_keep_messages = 4
+    return config
 
 
 def test_user_markdown_read_write_edit(tmp_path: Path) -> None:
@@ -209,12 +209,102 @@ def test_compact_trigger(tmp_path: Path) -> None:
 
 
 def test_cross_session_recall(tmp_path: Path) -> None:
-    """Student TODO: verify advanced remembers across sessions and baseline does not."""
+    """Verify Advanced persists corrected facts while Baseline forgets new threads."""
 
-    raise NotImplementedError
+    config = make_config(tmp_path)
+    baseline = BaselineAgent(config=config, force_offline=True)
+    advanced = AdvancedAgent(config=config, force_offline=True)
+    user_id = "dungct"
+    source_thread = "profile-thread"
+    facts = [
+        "Mình tên là DũngCT.",
+        "Mình ở Đà Nẵng và đang làm backend engineer cho startup AI.",
+        "Đồ uống yêu thích là cà phê sữa đá.",
+        "Mình muốn bạn trả lời ngắn gọn, có ví dụ thực tế.",
+        "Giờ mình đang ở Huế chứ không còn ở Đà Nẵng nữa.",
+        "Mình không còn làm backend engineer nữa, giờ chuyển sang MLOps engineer.",
+    ]
+    for fact in facts:
+        baseline.reply(user_id, source_thread, fact)
+        advanced.reply(user_id, source_thread, fact)
+
+    same_thread = baseline.reply(
+        user_id,
+        source_thread,
+        "Nhắc lại tên và nghề nghiệp hiện tại của mình?",
+    )["response"]
+    assert "DũngCT" in same_thread
+    assert "MLOps engineer" in same_thread
+
+    question = (
+        "Nhắc lại tên, nơi ở, nghề nghiệp hiện tại, đồ uống yêu thích "
+        "và style trả lời mình thích?"
+    )
+    baseline_recall = baseline.reply(user_id, "fresh-thread", question)
+    advanced_recall = advanced.reply(user_id, "fresh-thread", question)
+
+    assert "DũngCT" not in baseline_recall["response"]
+    assert "MLOps engineer" not in baseline_recall["response"]
+    for expected in (
+        "DũngCT",
+        "Huế",
+        "MLOps engineer",
+        "cà phê sữa đá",
+        "ngắn gọn",
+    ):
+        assert expected in advanced_recall["response"]
+    assert "Đà Nẵng" not in advanced_recall["response"]
+    assert "backend engineer" not in advanced_recall["response"]
+    assert advanced.memory_file_size(user_id) > 0
+    assert advanced_recall["tokens"] > 0
+    assert advanced_recall["prompt_tokens"] > 0
+    assert advanced.token_usage("fresh-thread") == advanced_recall["tokens"]
+    assert advanced.prompt_token_usage("fresh-thread") == advanced_recall["prompt_tokens"]
+
+
+def test_advanced_honors_three_bullet_profile(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    advanced = AdvancedAgent(config=config, force_offline=True)
+    advanced.reply("stress-user", "source-thread", "Mình tên là DũngCT Stress.")
+    advanced.reply(
+        "stress-user",
+        "source-thread",
+        "Mình muốn bạn trả lời ngắn gọn thành 3 bullet.",
+    )
+
+    answer = advanced.reply(
+        "stress-user",
+        "fresh-thread",
+        "Nhắc lại tên và style trả lời mình thích?",
+    )["response"]
+    assert len([line for line in answer.splitlines() if line.startswith("- ")]) == 3
+    assert "DũngCT Stress" in answer
+    assert "3 bullet" in answer
 
 
 def test_compact_reduces_prompt_load_on_long_thread(tmp_path: Path) -> None:
-    """Student TODO: compare prompt load of baseline vs advanced on a long thread."""
+    """Compare cumulative prompt load on the same synthetic long thread."""
 
-    raise NotImplementedError
+    config = make_config(tmp_path)
+    baseline = BaselineAgent(config=config, force_offline=True)
+    advanced = AdvancedAgent(config=config, force_offline=True)
+    user_id = "stress-user"
+    thread_id = "long-thread"
+
+    for index in range(16):
+        message = (
+            f"Lượt {index}: "
+            + "Thông tin kỹ thuật dài để kiểm tra chi phí context và compact memory. "
+            * 18
+        )
+        baseline.reply(user_id, thread_id, message)
+        advanced.reply(user_id, thread_id, message)
+
+    baseline_prompt = baseline.prompt_token_usage(thread_id)
+    advanced_prompt = advanced.prompt_token_usage(thread_id)
+    assert advanced.compaction_count(thread_id) > 0
+    assert advanced_prompt < baseline_prompt
+    assert advanced_prompt <= baseline_prompt * 0.75
+    assert baseline.token_usage(thread_id) > 0
+    assert advanced.token_usage(thread_id) > 0
+    assert baseline.compaction_count(thread_id) == 0
