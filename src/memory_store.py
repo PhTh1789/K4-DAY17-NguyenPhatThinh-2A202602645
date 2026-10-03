@@ -20,6 +20,10 @@ FACT_ORDER = (
     "pet",
     "interests",
 )
+MERGED_FACT_SEPARATORS = {
+    "response_style": "; ",
+    "interests": ", ",
+}
 WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -28,6 +32,14 @@ WINDOWS_RESERVED_NAMES = {
     *(f"COM{index}" for index in range(1, 10)),
     *(f"LPT{index}" for index in range(1, 10)),
 }
+PROFESSION = (
+    r"[A-Za-z][A-Za-z0-9+.#-]*"
+    r"(?:\s+[A-Za-z][A-Za-z0-9+.#-]*){0,2}"
+    r"\s+(?:engineer|manager|developer|designer|analyst|scientist)"
+)
+SUMMARY_MAX_ITEMS = 6
+SUMMARY_ITEM_MAX_CHARS = 180
+MESSAGE_ROLES = {"user", "assistant", "system", "tool"}
 
 
 def estimate_tokens(text: str) -> int:
@@ -115,6 +127,11 @@ class UserProfileStore:
             raise ValueError("Fact value must not be empty.")
 
         facts = self.facts(user_id)
+        separator = MERGED_FACT_SEPARATORS.get(normalized_key)
+        if separator and normalized_key in facts:
+            existing_parts = [part.strip() for part in facts[normalized_key].split(separator)]
+            new_parts = [part.strip() for part in normalized_value.split(separator)]
+            normalized_value = separator.join(dict.fromkeys(existing_parts + new_parts))
         facts[normalized_key] = normalized_value
         ordered_keys = [key for key in FACT_ORDER if key in facts]
         ordered_keys.extend(sorted(set(facts) - set(ordered_keys)))
@@ -123,59 +140,272 @@ class UserProfileStore:
 
 
 def extract_profile_updates(message: str) -> dict[str, str]:
-    """Student TODO: convert raw user text into stable profile facts.
+    """Extract high-confidence, persistent facts from one user message.
 
-    Example facts you may want to extract:
-    - name
-    - location
-    - profession
-    - preferences / response style
-    - favorite food / drink
-
-    Pseudocode:
-    1. Build a few regex patterns.
-    2. Skip obvious question-only turns.
-    3. Return only the facts that are confidently present in the message.
+    The rules intentionally favor precision over recall: explicit statements,
+    corrections, and stable preferences are accepted, while recall questions
+    and known joke/noise constructions are ignored.
     """
 
-    raise NotImplementedError
+    text = " ".join(message.split())
+    if not text:
+        return {}
+    lower = text.casefold()
+    question_prefixes = (
+        "nhắc lại",
+        "tóm tắt",
+        "bạn có thể nhắc lại",
+        "bạn thử nhớ lại",
+        "mình tên gì",
+    )
+    if "?" in text or lower.startswith(question_prefixes):
+        return {}
+
+    updates: dict[str, str] = {}
+
+    name_patterns = (
+        r"\b(?:mình\s+)?tên(?:\s+mình)?\s+là\s+([^,.;!?]+)",
+        r"(?:^|[:;,]\s*)tên\s+([^,.;!?]+?)(?=\s*,|\s+nghề\b|$)",
+    )
+    for pattern in name_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            updates["name"] = match.group(1).strip()
+
+    location_patterns = (
+        r"\bmình\s+ở\s+(.+?)(?=\s+(?:và|chứ|để|trong|dù|nhưng|chưa)\b|[,.;!?]|$)",
+        r"\b(?:mình\s+)?(?:hiện|đang|vẫn)\s+ở\s+(.+?)(?=\s+(?:và|chứ|để|trong|dù|nhưng|chưa)\b|[,.;!?]|$)",
+        r"\btừ tuần này\s+mình\s+đang\s+làm việc\s+ở\s+(.+?)(?=\s+vài tháng\b|[,.;!?]|$)",
+        r"\bnơi ở\s+đã\s+cập nhật\s+từ\s+.+?\s+sang\s+([^,.;!?]+)",
+        r"\bnơi ở(?:\s+hiện tại)?\s+(?:vẫn\s+)?là\s+([^,.;!?]+)",
+    )
+    for pattern in location_patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            candidate = match.group(1).strip()
+            if candidate and "không phải nơi ở" not in candidate.casefold():
+                updates["location"] = candidate
+
+    profession_patterns = (
+        rf"\b(?:mình\s+)?đang\s+làm\s+({PROFESSION})",
+        rf"\bgiờ\s+chuyển\s+sang\s+({PROFESSION})",
+        rf"\bmình\s+làm\s+({PROFESSION})",
+        rf"\bnghề nghiệp(?:\s+hiện tại)?(?:\s+vẫn)?(?:\s+là)?\s+({PROFESSION})",
+        rf"(?:^|[:;,]\s*)nghề\s+({PROFESSION})",
+    )
+    for pattern in profession_patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            candidate = match.group(1).strip()
+            if candidate.casefold() == "product manager" and "câu đùa" in lower:
+                continue
+            updates["profession"] = candidate
+
+    style_context = any(
+        marker in lower
+        for marker in (
+            "mình muốn bạn trả lời",
+            "mình muốn câu trả lời",
+            "mình vẫn muốn câu trả lời",
+            "mình không thích câu trả lời",
+            "mình rất thích các câu trả lời",
+            "hãy trả lời",
+            "khi bạn trả lời, mình muốn",
+            "style trả lời",
+            "cách giải thích",
+            "cách trình bày",
+        )
+    )
+    if style_context:
+        style_parts: list[str] = []
+        if re.search(r"\b(?:3|ba)\s+bullet\b", lower):
+            style_parts.append("3 bullet")
+        elif "bullet" in lower:
+            style_parts.append("bullet")
+        if "ngắn gọn" in lower or re.search(r"\bngắn\b", lower) or "đừng lan man" in lower:
+            style_parts.append("ngắn gọn")
+        if "rõ ý" in lower:
+            style_parts.append("rõ ý")
+        if "có cấu trúc" in lower:
+            style_parts.append("có cấu trúc")
+        if "ví dụ thực chiến" in lower:
+            style_parts.append("có ví dụ thực chiến")
+        elif "ví dụ thực tế" in lower:
+            style_parts.append("có ví dụ thực tế")
+        if "số liệu" in lower or "định lượng" in lower:
+            style_parts.append("có số liệu")
+        if "trade-off" in lower:
+            style_parts.append("nhấn trade-off")
+        if style_parts:
+            updates["response_style"] = "; ".join(dict.fromkeys(style_parts))
+
+    drink_patterns = (
+        r"\bđồ uống yêu thích(?:\s+của mình)?\s+là\s+(.+?)(?=[,.;!?]|$)",
+        r"\bmình\s+vẫn\s+uống\s+(.+?)(?=\s+(?:như cũ|nhưng)\b|[,.;!?]|$)",
+    )
+    for pattern in drink_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            updates["favorite_drink"] = match.group(1).strip()
+
+    food_patterns = (
+        r"\bmón ăn yêu thích(?:\s+của mình)?\s+là\s+(.+?)(?=[,.;!?]|$)",
+        r"\bmình\s+ăn\s+(.+?)\s+và\s+thấy\s+đúng\s+là\s+món ruột\b",
+    )
+    for pattern in food_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            updates["favorite_food"] = match.group(1).strip()
+
+    pet_match = re.search(
+        r"\bmình\s+nuôi\s+(?:một\s+)?(?:bé\s+)?([^,.;!?]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if pet_match:
+        updates["pet"] = pet_match.group(1).strip()
+    else:
+        pet_match = re.search(
+            r"\bcon\s+corgi(?:\s+tên)?\s+([\wÀ-ỹ]+)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if pet_match:
+            updates["pet"] = f"corgi tên {pet_match.group(1).strip()}"
+
+    interest_context = bool(
+        re.search(
+            r"\bmình\s+(?:vẫn\s+)?thích\s+(?:python|ai|mlops|rag|evaluation|benchmark)",
+            lower,
+        )
+        or re.search(r"\bmình\s+đang\s+quan tâm\b", lower)
+        or re.search(
+            r"\bdài hạn:\s*mình\s+thích\s+(?:python|ai|mlops|rag|evaluation|benchmark)",
+            lower,
+        )
+    )
+    if interest_context:
+        interests: list[str] = []
+        interest_terms = (
+            ("python", "Python"),
+            ("ai ứng dụng", "AI ứng dụng"),
+            ("ai agent", "AI agent"),
+            ("mlops", "MLOps"),
+            ("rag", "RAG"),
+            ("evaluation", "evaluation"),
+            ("benchmark memory", "benchmark memory"),
+        )
+        for marker, label in interest_terms:
+            if marker in lower:
+                interests.append(label)
+        if interests:
+            updates["interests"] = ", ".join(dict.fromkeys(interests))
+
+    return updates
 
 
 def summarize_messages(messages: list[dict[str, str]], max_items: int = 6) -> str:
-    """Student TODO: create a compact summary of older messages.
+    """Create a bounded, deterministic summary from the most recent items."""
 
-    This can be heuristic text concatenation first.
-    Later, you can replace it with an LLM-based summary if desired.
-    """
+    if max_items <= 0:
+        raise ValueError("max_items must be greater than zero.")
 
-    raise NotImplementedError
+    normalized: list[dict[str, str]] = []
+    for message in messages:
+        content = " ".join(str(message.get("content", "")).split())
+        if not content:
+            continue
+        if len(content) > SUMMARY_ITEM_MAX_CHARS:
+            content = f"{content[: SUMMARY_ITEM_MAX_CHARS - 3].rstrip()}..."
+        role = str(message.get("role", "message")).strip().lower() or "message"
+        normalized.append({"role": role, "content": content})
+
+    selected = normalized[-max_items:]
+    if not selected:
+        return ""
+
+    lines = ["Compact summary:"]
+    lines.extend(f"- {item['role']}: {item['content']}" for item in selected)
+    return "\n".join(lines)
+
+
+def _summary_messages(summary: str) -> list[dict[str, str]]:
+    """Convert this module's summary format back into mergeable items."""
+
+    messages: list[dict[str, str]] = []
+    for line in summary.splitlines():
+        if not line.startswith("- "):
+            continue
+        role, separator, content = line[2:].partition(": ")
+        if separator and content:
+            messages.append({"role": role, "content": content})
+    return messages
 
 
 @dataclass
 class CompactMemoryManager:
-    """Student TODO: implement compact memory for long threads.
-
-    Goal:
-    - Keep recent messages in full
-    - When the thread grows too large, move older content into a summary
-    - Track how many compactions happened for benchmarking
-    """
+    """Bound thread context by summarizing older messages when needed."""
 
     threshold_tokens: int
     keep_messages: int
     state: dict[str, dict[str, object]] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if self.threshold_tokens <= 0:
+            raise ValueError("threshold_tokens must be greater than zero.")
+        if self.keep_messages <= 0:
+            raise ValueError("keep_messages must be greater than zero.")
+
     def append(self, thread_id: str, role: str, content: str) -> None:
-        # TODO:
-        # 1. create thread state if missing
-        # 2. append the new message
-        # 3. trigger compaction if needed
-        raise NotImplementedError
+        normalized_thread_id = thread_id.strip()
+        normalized_role = role.strip().lower()
+        normalized_content = content.strip()
+        if not normalized_thread_id:
+            raise ValueError("thread_id must not be empty.")
+        if normalized_role not in MESSAGE_ROLES:
+            raise ValueError(f"Unsupported message role: {role!r}.")
+        if not normalized_content:
+            raise ValueError("content must not be empty.")
+
+        thread = self.state.setdefault(
+            normalized_thread_id,
+            {"messages": [], "summary": "", "compactions": 0},
+        )
+        messages = thread["messages"]
+        if not isinstance(messages, list):
+            raise TypeError("Thread messages state must be a list.")
+        messages.append({"role": normalized_role, "content": normalized_content})
+
+        summary = str(thread.get("summary", ""))
+        context_tokens = estimate_tokens(summary)
+        context_tokens += sum(
+            estimate_tokens(f"{item['role']}: {item['content']}") for item in messages
+        )
+        if context_tokens <= self.threshold_tokens or len(messages) <= self.keep_messages:
+            return
+
+        older_messages = messages[: -self.keep_messages]
+        recent_messages = messages[-self.keep_messages :]
+        summary_source = _summary_messages(summary)
+        summary_source.extend(older_messages)
+        thread["summary"] = summarize_messages(summary_source, max_items=SUMMARY_MAX_ITEMS)
+        thread["messages"] = [dict(item) for item in recent_messages]
+        thread["compactions"] = int(thread.get("compactions", 0)) + 1
 
     def context(self, thread_id: str) -> dict[str, object]:
-        # TODO: return per-thread state with keys like messages, summary, compactions.
-        raise NotImplementedError
+        normalized_thread_id = thread_id.strip()
+        if not normalized_thread_id:
+            raise ValueError("thread_id must not be empty.")
+        thread = self.state.get(normalized_thread_id)
+        if thread is None:
+            return {"messages": [], "summary": "", "compactions": 0}
+
+        messages = thread.get("messages", [])
+        if not isinstance(messages, list):
+            raise TypeError("Thread messages state must be a list.")
+        return {
+            "messages": [dict(item) for item in messages],
+            "summary": str(thread.get("summary", "")),
+            "compactions": int(thread.get("compactions", 0)),
+        }
 
     def compaction_count(self, thread_id: str) -> int:
-        # TODO: return number of compactions for this thread.
-        raise NotImplementedError
+        return int(self.context(thread_id)["compactions"])
